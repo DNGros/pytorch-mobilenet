@@ -1,12 +1,15 @@
+# https://github.com/marvis/pytorch-mobilenet/blob/master/benchmark.py
+
 import time
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torchvision.models as models
 from torch.autograd import Variable
+import timeit
 
 class MobileNet(nn.Module):
-    def __init__(self):
+    def __init__(self, max_group_size=None):
         super(MobileNet, self).__init__()
 
         def conv_bn(inp, oup, stride):
@@ -18,7 +21,8 @@ class MobileNet(nn.Module):
 
         def conv_dw(inp, oup, stride):
             return nn.Sequential(
-                nn.Conv2d(inp, inp, 3, stride, 1, groups=inp, bias=False),
+                nn.Conv2d(inp, inp, 3, stride, 1, 
+                    groups=min(inp, max_group_size or 9e9), bias=False),
                 nn.BatchNorm2d(inp),
                 nn.ReLU(inplace=True),
     
@@ -52,30 +56,37 @@ class MobileNet(nn.Module):
         x = self.fc(x)
         return x
 
-def speed(model, name):
+def speed(model, name, use_cuda, batch_size = 1):
     t0 = time.time()
-    input = torch.rand(1,3,224,224).cuda()
-    input = Variable(input, volatile = True)
-    t1 = time.time()
-
-    model(input)
-    t2 = time.time()
-
-    model(input)
-    t3 = time.time()
-    
-    print('%10s : %f' % (name, t3 - t2))
+    input = torch.rand(batch_size,3,224,224)
+    if use_cuda:
+        input = input.cuda()
+    with torch.no_grad():
+        t = timeit.Timer(lambda: model(input))
+    print(f"{name:15s} {t.timeit(number=10):0.5f}s")
 
 if __name__ == '__main__':
     #cudnn.benchmark = True # This will make network slow ??
-    resnet18 = models.resnet18().cuda()
-    alexnet = models.alexnet().cuda()
-    vgg16 = models.vgg16().cuda()
-    squeezenet = models.squeezenet1_0().cuda()
-    mobilenet = MobileNet().cuda()
+    models = [
+        ("resnet18", models.resnet18),
+        ("alexnet", models.alexnet),
+        ("vgg16", models.vgg16),
+        ("squeezenet1_0", models.squeezenet1_0),
+        ("mobilenet", MobileNet),
+        ("mobilenet one group", lambda: MobileNet(max_group_size=1)),
+        ("mobilenet four group", lambda: MobileNet(max_group_size=4))
+    ]
 
-    speed(resnet18, 'resnet18')
-    speed(alexnet, 'alexnet')
-    speed(vgg16, 'vgg16')
-    speed(squeezenet, 'squeezenet')
-    speed(mobilenet, 'mobilenet')
+    print(f"Pytorch v{torch.__version__}")
+    print(f"GPU name {torch.cuda.get_device_name(None)}")
+
+    for use_cuda in (True, False):
+        print(f"-----CUDA {use_cuda}-----")
+        for batch_size in (1, 4, 32):
+            print(f"--batch size = {batch_size}")
+            for model_name, init_func in models:
+                model = init_func()
+                if use_cuda:
+                    model = model.cuda()
+                speed(model, model_name, use_cuda, batch_size=batch_size)
+
